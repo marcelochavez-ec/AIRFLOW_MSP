@@ -1,0 +1,171 @@
+x-airflow-common: &airflow-common
+  image: ${AIRFLOW_IMAGE_NAME}
+  env_file:
+    - .env
+  environment:
+    AIRFLOW_HOME: ${AIRFLOW_HOME}
+    AIRFLOW_CONFIG: ${AIRFLOW_HOME}/config/airflow.cfg
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: ${AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS}
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: ${AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE}
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW__DATABASE__SQL_ALCHEMY_CONN}
+    DBSTATS_HOST: ${DBSTATS_HOST}
+    DBSTATS_PORT: ${DBSTATS_PORT}
+    DBSTATS_DB: ${DBSTATS_DB}
+    DBSTATS_USER: ${DBSTATS_USER}
+    DBSTATS_PASSWORD: ${DBSTATS_PASSWORD}
+    AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "false"
+    AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: ${TZ}
+    TZ: ${TZ}
+    PYTHONUNBUFFERED: "1"
+  user: "${AIRFLOW_UID}:0"
+  restart: unless-stopped
+  volumes:
+    - ${AIRFLOW_DAGS_DIR}:${AIRFLOW_HOME}/dags:z
+    - ${AIRFLOW_LOGS_DIR}:${AIRFLOW_HOME}/logs:z
+    - ${AIRFLOW_PLUGINS_DIR}:${AIRFLOW_HOME}/plugins:z
+    - ${AIRFLOW_CONFIG_DIR}:${AIRFLOW_HOME}/config:z
+    - ./config/simple-auth-login/index.html:/home/airflow/.local/lib/python3.14/site-packages/airflow/api_fastapi/auth/managers/simple/ui/dist/index.html:ro
+    - ./config/simple-auth-login/custom-login.js:/home/airflow/.local/lib/python3.14/site-packages/airflow/api_fastapi/auth/managers/simple/ui/dist/custom-login.js:ro
+    - ./img/LOGO_MSP.png:/home/airflow/.local/lib/python3.14/site-packages/airflow/api_fastapi/auth/managers/simple/ui/dist/LOGO_MSP.png:ro
+    - ./config/airflow-ui/index.html:/home/airflow/.local/lib/python3.14/site-packages/airflow/ui/dist/index.html:ro
+    - ./config/airflow-ui/custom-title.js:/home/airflow/.local/lib/python3.14/site-packages/airflow/ui/dist/custom-title.js:ro
+    - ./config/airflow-ui/i18n/locales/es/dashboard.json:/home/airflow/.local/lib/python3.14/site-packages/airflow/ui/dist/i18n/locales/es/dashboard.json:ro
+  networks:
+    - airflow-network
+
+services:
+  airflow-permissions-init:
+    <<: *airflow-common
+    user: "0:0"
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -euo pipefail
+        mkdir -p \
+          "${AIRFLOW_HOME}/dags" \
+          "${AIRFLOW_HOME}/logs" \
+          "${AIRFLOW_HOME}/plugins" \
+          "${AIRFLOW_HOME}/config"
+        chown -R "${AIRFLOW_UID}:0" \
+          "${AIRFLOW_HOME}/dags" \
+          "${AIRFLOW_HOME}/logs" \
+          "${AIRFLOW_HOME}/plugins" \
+          "${AIRFLOW_HOME}/config"
+    restart: "no"
+
+  airflow-init:
+    <<: *airflow-common
+    depends_on:
+      airflow-permissions-init:
+        condition: service_completed_successfully
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -euo pipefail
+        mkdir -p \
+          "${AIRFLOW_HOME}/dags" \
+          "${AIRFLOW_HOME}/logs" \
+          "${AIRFLOW_HOME}/plugins" \
+          "${AIRFLOW_HOME}/config"
+        python - <<'PY'
+        import os
+
+        import psycopg2
+        from psycopg2 import sql
+
+        conninfo = (
+            f"host={os.environ['POSTGRES_HOST']} "
+            f"port={os.environ['POSTGRES_PORT']} "
+            f"dbname={os.environ['POSTGRES_DB']} "
+            f"user={os.environ['POSTGRES_USER']} "
+            f"password={os.environ['POSTGRES_PASSWORD']}"
+        )
+
+        with psycopg2.connect(conninfo) as conn:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL("CREATE SCHEMA IF NOT EXISTS {} AUTHORIZATION {}").format(
+                        sql.Identifier(os.environ["POSTGRES_SCHEMA"]),
+                        sql.Identifier(os.environ["POSTGRES_USER"]),
+                    )
+                )
+        PY
+        python - <<'PY'
+        import json
+        import os
+        from pathlib import Path
+
+        password_file = Path(os.environ["AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE"])
+        password_file.write_text(
+            json.dumps({os.environ["AIRFLOW_ADMIN_USERNAME"]: os.environ["AIRFLOW_ADMIN_PASSWORD"]}) + "\n"
+        )
+        PY
+        airflow db migrate
+    restart: "no"
+
+  airflow-api-server:
+    <<: *airflow-common
+    command: api-server
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    ports:
+      - "${AIRFLOW_API_PORT}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"$${HOSTNAME}\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type DagProcessorJob --hostname \"$${HOSTNAME}\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type TriggererJob --hostname \"$${HOSTNAME}\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+networks:
+  airflow-network:
+    driver: bridge
