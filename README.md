@@ -11,7 +11,7 @@
 **Ingeniero en Estadística**  
 **Magíster en Estadística Aplicada**
 
-**Propietario intelectual y autor del proyecto**
+**Derecho intelectual - Copyright mayo 2026**
 
 `marcelo_chavez_ec@outlook.com`
 
