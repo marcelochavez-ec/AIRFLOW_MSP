@@ -2,6 +2,21 @@
   <img src="img/LOGO_MSP.png" alt="Ministerio de Salud Publica" width="520">
 </p>
 
+<div align="center">
+
+### Elaborado por
+
+## Marcelo Chávez Reinoso
+
+**Ingeniero en Estadística**  
+**Magíster en Estadística Aplicada**
+
+**Propietario intelectual y autor del proyecto**
+
+`marcelo_chavez_ec@outlook.com`
+
+</div>
+
 # DNEAISNS Airflow Stack
 
 Implementacion de Apache Airflow 3.2.1 para la orquestacion de flujos de datos de la Direccion Nacional de Estadistica y Analisis de la Informacion del Sistema Nacional de Salud.
